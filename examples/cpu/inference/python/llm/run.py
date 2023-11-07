@@ -26,6 +26,8 @@ def main(args_in: Optional[List[str]] = None) -> None:
     parser = argparse.ArgumentParser(description="Generation script")
 
     # general arguments.
+    parser.add_argument("--generator", action='store_true')
+    parser.add_argument("--model_class")
     parser.add_argument(
         "-m",
         "--model-name-or-path",
@@ -46,6 +48,9 @@ def main(args_in: Optional[List[str]] = None) -> None:
         help="bfloat16, float32",
     )
     parser.add_argument("--ipex", action="store_true")
+    parser.add_argument("--ipex-old", action="store_true")
+    parser.add_argument("--torch-compile", action="store_true")
+    parser.add_argument("--backend", default="ipex", type=str, help="backend of torch.compile")
     parser.add_argument("--output-dir", nargs="?", default="./saved_results")
 
     # quantization related arguments.
@@ -136,10 +141,20 @@ def main(args_in: Optional[List[str]] = None) -> None:
             infer_cmd.extend(["--num-warmup", str(args.num_warmup)])
             infer_cmd.extend(["--batch-size", str(args.batch_size)])
 
+            if args.model_class:
+                infer_cmd.extend(['--model_class', args.model_class])
+            if args.generator:
+                infer_cmd.extend(["--generator"])
             if args.greedy:
                 infer_cmd.extend(["--greedy"])
             if args.ipex:
                 infer_cmd.extend(["--ipex"])
+            if args.ipex_old:
+                infer_cmd.extend(["--ipex-old"])
+            if args.torch_compile:
+                infer_cmd.extend(["--torch-compile"])
+            if args.backend:
+                infer_cmd.extend(["--backend", str(args.backend)])
             if args.deployment_mode:
                 infer_cmd.extend(["--deployment-mode"])
             if args.profile:

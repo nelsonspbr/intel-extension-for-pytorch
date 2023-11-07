@@ -1,8 +1,11 @@
+import numpy as np
 import torch
 import time
+import transformers
 import json
 import pathlib
 import argparse
+import random
 
 from transformers import (
     AutoConfig,
@@ -53,8 +56,11 @@ parser.add_argument(
 parser.add_argument(
     "--config-file", default=None, type=str, help="specific configuration file"
 )
+parser.add_argument("--model_class")
+parser.add_argument("--generator", action='store_true')
 parser.add_argument("--greedy", action="store_true")
 parser.add_argument("--ipex", action="store_true")
+parser.add_argument("--ipex-old", action="store_true")
 parser.add_argument("--deployment-mode", action="store_true")
 parser.add_argument("--torch-compile", action="store_true")
 parser.add_argument("--backend", default="ipex", type=str, help="backend of torch.compile")
@@ -70,7 +76,7 @@ args = parser.parse_args()
 print(args)
 
 # import ipex
-if args.ipex:
+if args.ipex or args.ipex_old:
     import intel_extension_for_pytorch as ipex
 
     torch._C._jit_set_texpr_fuser_enabled(False)
@@ -87,7 +93,11 @@ amp_dtype = getattr(torch, args.dtype)
 model_type = next(
     (x for x in MODEL_CLASSES.keys() if x in args.model_id.lower()), "auto"
 )
-model_class = MODEL_CLASSES[model_type]
+if not args.model_class:
+  model_class = MODEL_CLASSES[model_type]
+else:
+  model_class = (getattr(transformers, args.model_class), AutoTokenizer)
+
 if args.config_file is None:
     config = AutoConfig.from_pretrained(
         args.model_id, torchscript=args.deployment_mode, trust_remote_code=True
@@ -106,6 +116,7 @@ model = model_class[0].from_pretrained(
     trust_remote_code=True,
 )
 tokenizer = model_class[1].from_pretrained(args.model_id, trust_remote_code=True)
+if not tokenizer.pad_token: tokenizer.pad_token = tokenizer.eos_token
 model = model.eval()
 model = model.to(memory_format=torch.channels_last)
 
@@ -118,9 +129,17 @@ if args.ipex:
         deployment_mode=args.deployment_mode,
     )
 
+if args.ipex_old:
+    model = ipex.optimize(
+        model.eval(),
+        dtype=amp_dtype,
+        inplace=True
+    )
+
 if args.torch_compile:
     if args.deployment_mode:
         raise SystemExit("[ERROR] deployment_mode cannot co-work with torch.compile, please set deployment_mode to False if want to use torch.compile.")
+    import intel_extension_for_pytorch as ipex
     model.generate = torch.compile(model.generate, backend=args.backend)
 
 num_beams = 1 if args.greedy else 4
@@ -131,6 +150,11 @@ generate_kwargs = dict(do_sample=False, temperature=0.9, num_beams=num_beams)
 def trace_handler(prof):
     print(prof.key_averages().table(sort_by="self_cpu_time_total", row_limit=-1))
 
+# (nelson) ---------------------------------------------------------------------
+dts = []
+def time_get(): return time.perf_counter_ns()
+def time_diff(t1, t0): return float(t1 - t0) / 1E9
+# ------------------------------------------------------------------------------
 
 if args.benchmark:
     if args.token_latency:
@@ -142,6 +166,11 @@ if args.benchmark:
         prompt_pool = json.load(f)
     if args.prompt is not None:
         prompt = args.prompt
+    elif model_type == "auto" and args.generator:
+        while True:
+            string = random.choice(list(tokenizer.vocab.keys()))
+            if string not in tokenizer.all_special_tokens: break
+        prompt = ' '.join([string] * int(args.input_tokens))
     elif model_type == "auto":
         raise SystemExit(
             "[ERROR] model prompt is not supported, please use --prompt for this model: "
@@ -154,7 +183,14 @@ if args.benchmark:
     else:
         raise SystemExit("[ERROR] Plese use --prompt if want to use custom input.")
 
-    input_size = tokenizer(prompt, return_tensors="pt").input_ids.size(dim=1)
+    input_size = tokenizer(
+        prompt,
+        max_length = int(args.input_tokens),
+        truncation = True,
+        padding    = 'max_length',
+        return_tensors="pt"
+    ).input_ids.size(dim=1)
+
     print("---- Prompt size:", input_size)
 
     # start
@@ -173,17 +209,37 @@ if args.benchmark:
                 on_trace_ready=trace_handler,
             ) as prof:
                 for i in range(5):
-                    input_ids = tokenizer(prompt, return_tensors="pt").input_ids
+                    input_ids = tokenizer(
+                        prompt,
+                        max_length = int(args.input_tokens),
+                        truncation = True,
+                        padding    = 'max_length',
+                        return_tensors="pt"
+                    ).input_ids
                     output = model.generate(
                         input_ids, max_new_tokens=args.max_new_tokens, **generate_kwargs
                     )
                     prof.step()
         for i in range(num_iter):
             tic = time.time()
-            input_ids = tokenizer(prompt, return_tensors="pt").input_ids
+            input_ids = tokenizer(
+                prompt, 
+                max_length = int(args.input_tokens),
+                truncation = True,
+                padding    = 'max_length',
+                return_tensors="pt"
+            ).input_ids
+
+            t0 = time_get()
+            print('(nelson)', 'iteration: %4d' % (i))
             output = model.generate(
                 input_ids, max_new_tokens=args.max_new_tokens, **generate_kwargs
             )
+            t1 = time_get()
+            dt = time_diff(t1, t0)
+            print('(nelson)', 'iteration: %4d - delta: %16.9f' % (i, dt))
+            dts.append(dt)
+
             gen_ids = output[0] if args.token_latency else output
             gen_text = tokenizer.batch_decode(gen_ids, skip_special_tokens=True)
             toc = time.time()
@@ -193,7 +249,7 @@ if args.benchmark:
                 o - i if model.config.model_type != "t5" else o
                 for i, o in zip(input_tokens_lengths, output_tokens_lengths)
             ]
-            print(gen_text, total_new_tokens, flush=True)
+            print('(nelson)', 'Total new tokens:', total_new_tokens)
             print("Iteration: %d, Time: %.6f sec" % (i, toc - tic), flush=True)
             if i >= num_warmup:
                 total_time += toc - tic
@@ -218,3 +274,13 @@ if args.benchmark:
         print("Average 2... latency: %.3f sec." % average_2n_latency)
         print("P90 2... latency: %.3f sec." % p90_latency)
         print("P99 2... latency: %.3f sec." % p99_latency)
+
+    print()
+    print('(nelson) it0 = %16.9f' % (dts[0]))
+    print('(nelson) min = %16.9f' % (min(dts[1:])))
+    print('(nelson) max = %16.9f' % (max(dts[1:])))
+    print('(nelson) med = %16.9f' % (np.median(dts[1:])))
+    print('(nelson) avg = %16.9f' % (np.mean(dts[1:])))
+    print('(nelson) std = %16.9f' % (np.std(dts[1:])))
+    print()
+

@@ -323,6 +323,11 @@ elif args.ipex_weight_only_quantization:
         pathlib.Path(args.output_dir).mkdir(parents=True, exist_ok=True)
         self_jit.save(args.output_dir + "/best_model.pt")
 
+# (nelson) ---------------------------------------------------------------------
+dts = []
+def time_get(): return time.perf_counter_ns()
+def time_diff(t1, t0): return float(t1 - t0) / 1E9
+# ------------------------------------------------------------------------------
 
 if args.benchmark:
     torch._C._jit_set_texpr_fuser_enabled(False)
@@ -370,9 +375,17 @@ if args.benchmark:
         for i in range(num_iter):
             tic = time.time()
             input_ids = tokenizer(prompt, return_tensors="pt").input_ids
+
+            t0 = time_get()
+            print('(nelson)', 'iteration: %4d' % (i))
             output = user_model.generate(
                 input_ids, max_new_tokens=args.max_new_tokens, **generate_kwargs
             )
+            t1 = time_get()
+            dt = time_diff(t1, t0)
+            print('(nelson)', 'iteration: %4d - delta: %16.9f' % (i, dt))
+            dts.append(dt)
+
             gen_ids = output[0] if args.token_latency else output
             gen_text = tokenizer.batch_decode(gen_ids, skip_special_tokens=True)
             toc = time.time()
@@ -382,7 +395,6 @@ if args.benchmark:
                 o - i if user_model.config.model_type != "t5" else o
                 for i, o in zip(input_tokens_lengths, output_tokens_lengths)
             ]
-            print(gen_text, total_new_tokens, flush=True)
             print("Iteration: %d, Time: %.6f sec" % (i, toc - tic), flush=True)
             if i >= num_warmup:
                 total_time += toc - tic
@@ -427,3 +439,15 @@ if args.benchmark:
         print("Average 2... latency: %.3f sec." % average_2n_latency)
         print("P90 2... latency: %.3f sec." % p90_latency)
         print("P99 2... latency: %.3f sec." % p99_latency)
+
+    import numpy as np
+
+    print()
+    print('(nelson) it0 = %16.9f' % (dts[0]))
+    print('(nelson) min = %16.9f' % (min(dts[1:])))
+    print('(nelson) max = %16.9f' % (max(dts[1:])))
+    print('(nelson) med = %16.9f' % (np.median(dts[1:])))
+    print('(nelson) avg = %16.9f' % (np.mean(dts[1:])))
+    print('(nelson) std = %16.9f' % (np.std(dts[1:])))
+    print()
+
