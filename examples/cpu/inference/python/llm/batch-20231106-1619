@@ -3,6 +3,7 @@
 export PYTHONUNBUFFERED=1
 export OMP_NUM_THREADS=96
 export NUMACTL="numactl -C 0-95"
+export HF_HOME=$NMG/hf
 
 user="$(whoami)"
 host="$(hostname)"
@@ -36,7 +37,8 @@ base="
   --input-tokens=\${ii} \
   --max-new-tokens=\${oo} \
   --batch-size=\${bb} \
-  --greedy"
+  --greedy \
+  --generator"
 
 function echoval {
   echo
