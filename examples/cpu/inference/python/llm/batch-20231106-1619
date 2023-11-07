@@ -1,0 +1,83 @@
+#!/bin/bash
+
+export PYTHONUNBUFFERED=1
+export OMP_NUM_THREADS=96
+export NUMACTL="numactl -C 0-95"
+
+user="$(whoami)"
+host="$(hostname)"
+btim="$(date +%Y%m%d-%H%M%S.%N)"
+bdir="outputs/${user}/${host}/${btim}"
+
+echo
+echo "starting batch: ${bdir}"
+echo
+
+declare -a runs
+runs+=("mm=models/llama-13b;         cls=AutoModelForCausalLM;  ii=512;  oo=50;  bb=1;")
+runs+=("mm=google/flan-t5-xxl;       cls=AutoModelForSeq2SeqLM; ii=1024; oo=256; bb=1;")
+runs+=("mm=google/flan-ul2;          cls=AutoModelForSeq2SeqLM; ii=1024; oo=256; bb=1;")
+runs+=("mm=ibm/granite-3b-code;      cls=GPTBigCodeForCausalLM; ii=1024; oo=256; bb=1;")
+runs+=("mm=ibm/granite-13b-instruct; cls=GPTBigCodeForCausalLM; ii=1024; oo=256; bb=1;")
+runs+=("mm=ibm/granite-20b-code;     cls=GPTBigCodeForCausalLM; ii=1024; oo=256; bb=1;")
+
+declare -A opts
+opts["bf16"         ]="--dtype=bfloat16"
+opts["bf16-ipex-old"]="--dtype=bfloat16 --ipex-old"
+opts["bf16-ipex-new"]="--dtype=bfloat16 --ipex"
+
+base="
+\${NUMACTL} python run.py \
+  --benchmark \
+  --num-warmup=5 \
+  --num-iter=10 \
+  -m=\${mm} \
+  --model_class=\${cls} \
+  --input-tokens=\${ii} \
+  --max-new-tokens=\${oo} \
+  --batch-size=\${bb} \
+  --greedy"
+
+function echoval {
+  echo
+  echo ${@}
+  echo
+  eval ${@}
+}
+
+for run in "${runs[@]}"; do
+for opt in "${!opts[@]}"; do
+
+eval ${run}
+
+etim="$(date +%Y%m%d-%H%M%S.%N)"
+edir="${bdir}/${etim}"
+edir+="/${mm##*/}"
+edir+="/${ii}"
+edir+="/${oo}"
+edir+="/${bb}"
+edir+="/${opt}"
+edir=$(echo ${edir})
+
+echo
+echo "mm  = ${mm}"
+echo "ii  = ${ii}"
+echo "oo  = ${oo}"
+echo "bb  = ${bb}"
+echo "opt = ${opt}"
+echo "dir = ${edir}"
+
+mkdir -p ${edir}
+cmd=$(eval echo ${base} ${opts[${opt}]})
+echo
+echo ${cmd} |& tee "${edir}/cmd"
+echo
+eval ${cmd} |& tee "${edir}/out"
+
+done
+done
+
+echo
+echo "finished batch: ${bdir}"
+echo
+
